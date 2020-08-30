@@ -1,5 +1,3 @@
-// A simple and pretty naive ARP client using tun.
-
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -27,10 +25,18 @@
 #define ARP_REQUEST 0x0001
 #define ARP_REPLY 0x0002
 
-uint32_t MY_IP = 0x0100530a;
-char MY_MAC[] = "\x00\x01\x02\x03\x04\x05";
-int tun_fd;
+const uint32_t MY_IP = 0x0100530a;  // 10.83.0.1
+const char MY_MAC[] = "\x61\x62\x63\x64\x65\x66";
 
+// Ethernet frame (layer 2).
+struct eth_hdr {
+  unsigned char dmac[6];
+  unsigned char smac[6];
+  uint16_t ethertype;
+  unsigned char payload[];
+} __attribute__((packed));
+
+// ARP frame (layer 2).
 struct arp_hdr {
   uint16_t hwtype;
   uint16_t protype;
@@ -40,6 +46,7 @@ struct arp_hdr {
   unsigned char data[];
 } __attribute__((packed));
 
+// IP-specific ARP data (layer 2).
 struct arp_ipv4 {
   unsigned char smac[6];
   uint32_t sip;
@@ -47,23 +54,10 @@ struct arp_ipv4 {
   uint32_t dip;
 } __attribute__((packed));
 
-struct eth_hdr {
-  unsigned char dmac[6];
-  unsigned char smac[6];
-  uint16_t ethertype;
-  unsigned char payload[];
-} __attribute__((packed));
-
-void hexdump(char *str, int len) {
-  for (int i = 0; i < len; i++) {
-    if (i > 0 && i % 16 == 0) {
-      printf("\n");
-    }
-    printf("%02x ", (unsigned char)str[i]);
-  }
-  printf("\n");
-}
-
+// Allocate a tun device. To simplify code, it's not activated
+// programatically, so you still need to run this manually:
+//
+// ip link set dev tap0 up
 int tun_alloc(char *dev) {
   struct ifreq ifr;
   int fd, err;
@@ -81,57 +75,62 @@ int tun_alloc(char *dev) {
   return fd;
 }
 
-void handle_arp(struct eth_hdr *hdr) {
+// Handle ARP packet
+// Generate response if it's directed at us, otherwise ignore it.
+void handle_arp(int tun_fd, struct eth_hdr *hdr) {
   struct arp_hdr *arphdr = (struct arp_hdr *)hdr->payload;
 
   if (ntohs(arphdr->hwtype) != ARP_ETHERNET) {
-    printf("[arp] some bullshit hardware");
+    printf("[arp] unknown hardware");
     return;
   }
 
   if (ntohs(arphdr->protype) != ARP_IPV4) {
-    printf("[arp] some bullshit protocol");
+    printf("[arp] unknown protocol");
     return;
   }
 
-  if (ntohs(arphdr->opcode) == ARP_REQUEST) {
-    struct arp_ipv4 *arpdata = (struct arp_ipv4 *)arphdr->data;
-
-    printf("[arp] request\n");
-    printf("[arp] from %02x:%02x:%02x:%02x:%02x:%02x\n", arpdata->smac[0],
-           arpdata->smac[1], arpdata->smac[2], arpdata->smac[3],
-           arpdata->smac[4], arpdata->smac[5]);
-    printf("[arp] who-has %d.%d.%d.%d\n", (arpdata->dip >> 0) & 0xFF,
-           (arpdata->dip >> 8) & 0xFF, (arpdata->dip >> 16) & 0xFF,
-           (arpdata->dip >> 24) & 0xFF);
-
-    if (MY_IP != arpdata->dip) {
-      printf("[arp] not relevant to us\n");
-    }
-
-    memcpy(arpdata->dmac, arpdata->smac, 6);
-    arpdata->dip = arpdata->sip;
-    memcpy(arpdata->smac, MY_MAC, 6);
-    arpdata->sip = MY_IP;
-    arphdr->opcode = htons(ARP_REPLY);
-
-    memcpy(hdr->smac, MY_MAC, 6);
-    memcpy(hdr->dmac, arpdata->dmac, 6);
-
-    int len = (sizeof(struct eth_hdr) + sizeof(struct arp_hdr) +
-               sizeof(struct arp_ipv4));
-    CHECK(write(tun_fd, (char *)hdr, len));
-  } else {
-    printf("[arp] some bullshit opcode");
+  if (ntohs(arphdr->opcode) != ARP_REQUEST) {
+    printf("[arp] unknown opcode");
+    return;
   }
+
+  struct arp_ipv4 *arpdata = (struct arp_ipv4 *)arphdr->data;
+
+  printf("[arp] request\n");
+  printf("[arp] from %02x:%02x:%02x:%02x:%02x:%02x\n", arpdata->smac[0],
+         arpdata->smac[1], arpdata->smac[2], arpdata->smac[3], arpdata->smac[4],
+         arpdata->smac[5]);
+  printf("[arp] who-has %d.%d.%d.%d\n", (arpdata->dip >> 0) & 0xFF,
+         (arpdata->dip >> 8) & 0xFF, (arpdata->dip >> 16) & 0xFF,
+         (arpdata->dip >> 24) & 0xFF);
+
+  if (MY_IP != arpdata->dip) {
+    printf("[arp] not relevant to us\n");
+    return;
+  }
+
+  printf("[arp] response\n");
+  memcpy(arpdata->dmac, arpdata->smac, 6);
+  arpdata->dip = arpdata->sip;
+  memcpy(arpdata->smac, MY_MAC, 6);
+  arpdata->sip = MY_IP;
+  arphdr->opcode = htons(ARP_REPLY);
+
+  memcpy(hdr->smac, MY_MAC, 6);
+  memcpy(hdr->dmac, arpdata->dmac, 6);
+
+  int len = (sizeof(struct eth_hdr) + sizeof(struct arp_hdr) +
+             sizeof(struct arp_ipv4));
+  CHECK(write(tun_fd, (char *)hdr, len));
 }
 
-void handle_eth(char *buf) {
-  struct eth_hdr *hdr = (struct eth_hdr *)buf;
-  int ethtype = ntohs(hdr->ethertype);
+// Handle a generic ethernet frame. Currently only ARP is supported.
+void handle_eth(int tun_fd, struct eth_hdr *packet) {
+  int ethtype = ntohs(packet->ethertype);
   if (ethtype == ETH_P_ARP) {
     printf("[eth] incoming arp\n");
-    handle_arp(hdr);
+    handle_arp(tun_fd, packet);
   } else if (ethtype == ETH_P_IP) {
     printf("[eth] incoming ipv4\n");
   } else if (ethtype == ETH_P_IPV6) {
@@ -143,13 +142,13 @@ void handle_eth(char *buf) {
 
 int main() {
   char dev[10];
-  tun_fd = tun_alloc(dev);
+  int tun_fd = tun_alloc(dev);
   printf("[init] tun %s\n", dev);
 
   char buf[8192];
 
   while (true) {
     CHECK(read(tun_fd, buf, sizeof(buf)));
-    handle_eth(buf);
+    handle_eth(tun_fd, (struct eth_hdr *)buf);
   }
 }
