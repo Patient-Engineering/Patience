@@ -57,9 +57,9 @@ int main() {
 
   const size_t mem_size = 0x10000;
   void *mem_page = mmap(NULL, mem_size, PROT_READ | PROT_WRITE,
-                   MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   memcpy(mem_page, code, sizeof(code));
-  strcpy((char*)mem_page + 0x500, ":kotchivaya:\n");
+  strcpy((char *)mem_page + 0x500, ":kotchivaya:\n");
 
   struct kvm_userspace_memory_region mem_region = {
       .slot = 0,
@@ -95,9 +95,9 @@ int main() {
   uint64_t pdpt_addr = 0x2000;
   uint64_t pd_addr = 0x3000;
 
-  *(uint64_t *)((char*)mem_page + pml4_addr) = 3 | pdpt_addr;
-  *(uint64_t *)((char*)mem_page + pdpt_addr) = 3 | pd_addr;
-  *(uint64_t *)((char*)mem_page + pd_addr) = 3 | 0x80;
+  *(uint64_t *)((char *)mem_page + pml4_addr) = 3 | pdpt_addr;
+  *(uint64_t *)((char *)mem_page + pdpt_addr) = 3 | pd_addr;
+  *(uint64_t *)((char *)mem_page + pd_addr) = 3 | 0x80;
 
   sregs.cr3 = pml4_addr;
   sregs.cr4 = 1 << 5;
@@ -105,16 +105,16 @@ int main() {
   sregs.efer = 0x500;
 
   struct kvm_segment seg = {
-    .base = 0,
-    .limit = 0xffffffff,
-    .selector = 1 << 3,
-    .present = 1,
-    .type = 11,
-    .dpl = 0,
-    .db = 0,
-    .s = 1,
-    .l = 1,
-    .g = 1,
+      .base = 0,
+      .limit = 0xffffffff,
+      .selector = 1 << 3,
+      .present = 1,
+      .type = 11,
+      .dpl = 0,
+      .db = 0,
+      .s = 1,
+      .l = 1,
+      .g = 1,
   };
   sregs.cs = seg;
   seg.type = 3;
